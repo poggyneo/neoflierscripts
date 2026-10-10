@@ -1,0 +1,1215 @@
+#include <windows.h>
+#include "overlay/overlay.hpp"
+#include "core/game_manager.hpp"
+#include "util/log.hpp"
+
+#ifndef NF_TITLE
+#define NF_TITLE "Neo Flier"
+#endif
+
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
+    Log::init();
+    GameManager::get().init();
+    if (!Overlay::get().create(hInst)) {
+        MessageBoxW(nullptr, L"Failed to create overlay", L"Neo Flier", MB_ICONERROR);
+        return 1;
+    }
+    Overlay::get().run();
+    Overlay::get().destroy();
+    return 0;
+}
+
+
+#pragma once
+#include <cmath>
+
+struct FVector  { double X=0, Y=0, Z=0;
+    FVector operator-(const FVector&o) const { return {X-o.X,Y-o.Y,Z-o.Z}; }
+    FVector operator+(const FVector&o) const { return {X+o.X,Y+o.Y,Z+o.Z}; } };
+struct FRotator { double Pitch=0, Yaw=0, Roll=0; };
+struct FVector2 { float X=0, Y=0; };
+
+constexpr double RAD2DEG = 57.29577951308232;
+constexpr double DEG2RAD = 0.017453292519943295;
+
+inline FRotator calcAngle(const FVector& s, const FVector& d) {
+    FVector v = d - s;
+    double hyp = std::sqrt(v.X*v.X + v.Y*v.Y);
+    return { std::atan2(v.Z, hyp) * RAD2DEG, std::atan2(v.Y, v.X) * RAD2DEG, 0 };
+}
+inline double normAngle(double a){ while(a>180)a-=360; while(a<-180)a+=360; return a; }
+inline double angleDist(const FRotator& a, const FRotator& b){
+    double dp = normAngle(a.Pitch-b.Pitch), dy = normAngle(a.Yaw-b.Yaw);
+    return std::sqrt(dp*dp + dy*dy);
+}
+inline bool worldToScreen(const FVector& w, const FVector& cam, const FRotator& rot,
+                          double fov, int sw, int sh, FVector2& out) {
+    FVector d = w - cam;
+    double yaw = rot.Yaw*DEG2RAD, pitch = rot.Pitch*DEG2RAD;
+    double cy=std::cos(yaw), sy=std::sin(yaw), cp=std::cos(pitch), sp=std::sin(pitch);
+    double fX=cp*cy, fY=cp*sy, fZ=sp;
+    double rX=-sy,  rY=cy,    rZ=0;
+    double uX=fY*rZ-fZ*rY, uY=fZ*rX-fX*rZ, uZ=fX*rY-fY*rX;
+    double z = d.X*fX + d.Y*fY + d.Z*fZ;
+    if (z <= 0.01) return false;
+    double x = d.X*rX + d.Y*rY + d.Z*rZ;
+    double y = d.X*uX + d.Y*uY + d.Z*uZ;
+    double t = std::tan(fov*DEG2RAD*0.5);
+    double aspect = (double)sw/sh;
+    out.X = (float)(sw/2.0 + (x/(z*t*aspect))*(sw/2.0));
+    out.Y = (float)(sh/2.0 - (y/(z*t))*(sh/2.0));
+    return true;
+}
+
+
+#pragma once
+#include <string>
+#include <vector>
+
+namespace Log {
+    void init();
+    void info(const std::string& msg);
+    void warn(const std::string& msg);
+    const std::vector<std::string>& lines();
+    std::string filePath();
+}
+
+
+#include "log.hpp"
+#include <windows.h>
+#include <shlobj.h>
+#include <fstream>
+#include <mutex>
+#include <ctime>
+
+static std::string g_dir, g_path;
+static std::vector<std::string> g_lines;
+static std::mutex g_mtx;
+
+static void stamp(const char* lvl, const std::string& m) {
+    std::time_t t = std::time(nullptr);
+    char ts[32]; std::strftime(ts, sizeof(ts), "%H:%M:%S", std::localtime(&t));
+    std::string line = std::string("[") + ts + "] " + lvl + " " + m;
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_lines.push_back(line);
+    if (g_lines.size() > 500) g_lines.erase(g_lines.begin());
+    std::ofstream f(g_path, std::ios::app);
+    f << line << "\n";
+}
+
+void Log::init() {
+    char buf[MAX_PATH];
+    SHGetFolderPathA(nullptr, CSIDL_APPDATA, nullptr, 0, buf);
+    g_dir = std::string(buf) + "\\NeoFlier";
+    CreateDirectoryA(g_dir.c_str(), nullptr);
+    g_path = g_dir + "\\neoflier.log";
+    stamp("INFO", "Neo Flier started");
+}
+void Log::info(const std::string& m){ stamp("INFO", m); }
+void Log::warn(const std::string& m){ stamp("WARN", m); }
+const std::vector<std::string>& Log::lines(){ return g_lines; }
+std::string Log::filePath(){ return g_path; }
+
+
+#pragma once
+#include <windows.h>
+#include <optional>
+
+namespace stealth {
+    std::optional<HANDLE> hijackHandle(DWORD pid);
+    HANDLE openMinimal(DWORD pid);
+}
+
+
+#include "stealth.hpp"
+#include "log.hpp"
+#include <winternl.h>
+#include <vector>
+#include <string>
+
+typedef NTSTATUS (NTAPI *NtQSI_t)(ULONG, PVOID, ULONG, PULONG);
+
+struct HandleEntryEx {
+    PVOID Object; ULONG_PTR UniqueProcessId; ULONG_PTR HandleValue;
+    ULONG GrantedAccess; USHORT CreatorBackTraceIndex; USHORT ObjectTypeIndex;
+    ULONG HandleAttributes; ULONG Reserved;
+};
+struct HandleInfoEx {
+    ULONG_PTR NumberOfHandles; ULONG_PTR Reserved; HandleEntryEx Handles[1];
+};
+
+static std::string procName(DWORD pid) {
+    char buf[MAX_PATH] = {}; DWORD sz = MAX_PATH;
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (h) { QueryFullProcessImageNameA(h, 0, buf, &sz); CloseHandle(h); }
+    std::string s = buf;
+    auto p = s.find_last_of("\\/");
+    return p == std::string::npos ? s : s.substr(p + 1);
+}
+
+std::optional<HANDLE> stealth::hijackHandle(DWORD pid) {
+    auto NtQSI = (NtQSI_t)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),
+                                         "NtQuerySystemInformation");
+    if (!NtQSI) return std::nullopt;
+
+    ULONG size = 1 << 20; std::vector<BYTE> buf; NTSTATUS st;
+    do {
+        buf.resize(size);
+        st = NtQSI(0x40, buf.data(), size, &size);
+        size *= 2;
+    } while (st == (NTSTATUS)0xC0000004);
+
+    auto* info = (HandleInfoEx*)buf.data();
+    DWORD myPid = GetCurrentProcessId();
+
+    HANDLE probe = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!probe) return std::nullopt;
+    PVOID targetObj = nullptr;
+    for (ULONG_PTR i = 0; i < info->NumberOfHandles; ++i) {
+        auto& h = info->Handles[i];
+        if ((DWORD)h.UniqueProcessId == myPid && (HANDLE)h.HandleValue == probe) {
+            targetObj = h.Object; break;
+        }
+    }
+    CloseHandle(probe);
+    if (!targetObj) return std::nullopt;
+
+    for (ULONG_PTR i = 0; i < info->NumberOfHandles; ++i) {
+        auto& h = info->Handles[i];
+        if (h.Object != targetObj) continue;
+        if ((DWORD)h.UniqueProcessId == myPid) continue;
+        if ((h.GrantedAccess & PROCESS_VM_READ) == 0) continue;
+
+        HANDLE owner = OpenProcess(PROCESS_DUP_HANDLE, FALSE, (DWORD)h.UniqueProcessId);
+        if (!owner) continue;
+        HANDLE dup = nullptr;
+        if (DuplicateHandle(owner, (HANDLE)h.HandleValue, GetCurrentProcess(), &dup,
+                PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, 0)) {
+            CloseHandle(owner);
+            Log::info("Hijacked handle to pid " + std::to_string(pid) +
+                      " from " + procName((DWORD)h.UniqueProcessId));
+            return dup;
+        }
+        CloseHandle(owner);
+    }
+    Log::warn("Handle hijack failed for pid " + std::to_string(pid));
+    return std::nullopt;
+}
+
+HANDLE stealth::openMinimal(DWORD pid) {
+    HANDLE h = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!h) h = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    return h;
+}
+
+
+#pragma once
+#include <windows.h>
+#include <cstdint>
+#include <string>
+#include <optional>
+
+class Memory {
+public:
+    HANDLE hProc = nullptr;
+    uintptr_t base = 0;
+    bool attached = false;
+
+    bool attach(const wchar_t* exe);
+    void detach();
+    static DWORD findPid(const wchar_t* exe);
+
+    template<class T> T read(uintptr_t addr) const {
+        T v{};
+        if (hProc) ReadProcessMemory(hProc, (LPCVOID)addr, &v, sizeof(T), nullptr);
+        return v;
+    }
+    template<class T> void write(uintptr_t addr, const T& v) const {
+        if (hProc) WriteProcessMemory(hProc, (LPVOID)addr, &v, sizeof(T), nullptr);
+    }
+    void writeBytes(uintptr_t addr, const void* data, size_t n) const {
+        if (hProc) WriteProcessMemory(hProc, (LPVOID)addr, data, n, nullptr);
+    }
+    std::string readString(uintptr_t addr, size_t n) const {
+        std::string s(n, 0);
+        if (hProc) ReadProcessMemory(hProc, (LPCVOID)addr, s.data(), n, nullptr);
+        return s;
+    }
+    uintptr_t readPtr(uintptr_t addr) const { return read<uintptr_t>(addr); }
+
+    std::optional<uintptr_t> patternScan(uintptr_t start, size_t size, const char* sig);
+    std::optional<uintptr_t> patternScanModule(const char* sig);
+};
+
+
+#include "memory.hpp"
+#include "stealth.hpp"
+#include <tlhelp32.h>
+#include <vector>
+#include <cstdlib>
+
+DWORD Memory::findPid(const wchar_t* exe) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    PROCESSENTRY32W pe{ sizeof(pe) };
+    for (BOOL ok = Process32FirstW(snap,&pe); ok; ok = Process32NextW(snap,&pe))
+        if (!_wcsicmp(pe.szExeFile, exe)) { CloseHandle(snap); return pe.th32ProcessID; }
+    CloseHandle(snap); return 0;
+}
+
+bool Memory::attach(const wchar_t* exe) {
+    DWORD pid = findPid(exe);
+    if (!pid) return false;
+
+    hProc = stealth::hijackHandle(pid).value_or(nullptr);
+    if (!hProc) hProc = stealth::openMinimal(pid);
+    if (!hProc) return false;
+
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE|TH32CS_SNAPMODULE32, pid);
+    MODULEENTRY32W me{ sizeof(me) };
+    for (BOOL ok = Module32FirstW(snap,&me); ok; ok = Module32NextW(snap,&me))
+        if (!_wcsicmp(me.szModule, exe)) { base = (uintptr_t)me.modBaseAddr; break; }
+    CloseHandle(snap);
+    attached = base != 0;
+    return attached;
+}
+
+void Memory::detach() {
+    if (hProc) CloseHandle(hProc);
+    hProc = nullptr; base = 0; attached = false;
+}
+
+std::optional<uintptr_t> Memory::patternScan(uintptr_t start, size_t size, const char* sig) {
+    std::vector<int> pat; std::vector<bool> mask;
+    for (const char* p = sig; *p; ) {
+        if (*p == ' ') { ++p; continue; }
+        if (*p == '?') { pat.push_back(0); mask.push_back(false); ++p; if (*p=='?') ++p; }
+        else {
+            pat.push_back((int)strtol(std::string(p, p+2).c_str(), nullptr, 16));
+            mask.push_back(true); p += 2;
+        }
+    }
+    std::vector<uint8_t> buf(size); SIZE_T rd = 0;
+    ReadProcessMemory(hProc, (LPCVOID)start, buf.data(), size, &rd);
+    for (size_t i = 0; i + pat.size() <= rd; ++i) {
+        bool ok = true;
+        for (size_t j = 0; j < pat.size(); ++j)
+            if (mask[j] && buf[i+j] != pat[j]) { ok = false; break; }
+        if (ok) return start + i;
+    }
+    return std::nullopt;
+}
+
+std::optional<uintptr_t> Memory::patternScanModule(const char* sig) {
+    return patternScan(base, 0x6000000, sig);
+}
+
+
+#pragma once
+#include <string>
+#include <vector>
+#include <functional>
+#include <memory>
+
+enum class SettingType { Bool, Int, Float, Enum };
+
+struct Setting {
+    std::string name;
+    SettingType type;
+    bool b=false; int i=0; float f=0;
+    float min=0, max=100, step=1;
+    std::vector<std::string> options; int enumIndex=0;
+    Setting(std::string n, SettingType t):name(std::move(n)),type(t){}
+    std::string valueString() const {
+        switch(type){
+            case SettingType::Bool:  return b?"true":"false";
+            case SettingType::Int:   return std::to_string(i);
+            case SettingType::Float: return std::to_string(f);
+            case SettingType::Enum:  return options.empty()?"":options[enumIndex];
+        } return "";
+    }
+};
+
+class Module {
+public:
+    std::string name, category;
+    bool enabled=false; int key=0;
+    std::vector<std::shared_ptr<Setting>> settings;
+    std::function<void(Module&)> onTick, onRender, onMenu;
+    Module(std::string n, std::string c):name(std::move(n)),category(std::move(c)){}
+
+    std::shared_ptr<Setting> addSetting(SettingType t, const std::string& n){
+        auto s=std::make_shared<Setting>(n,t); settings.push_back(s); return s;
+    }
+    void tick(){ if(enabled&&onTick) onTick(*this); }
+    void render(){ if(enabled&&onRender) onRender(*this); }
+};
+
+
+#pragma once
+#include "module.hpp"
+#include <vector>
+#include <memory>
+#include <string>
+
+class IGame {
+public:
+    virtual ~IGame() = default;
+    virtual const char* name() const = 0;
+    virtual bool isRunning() = 0;
+    virtual bool attach() = 0;
+    virtual void detach() = 0;
+    virtual void tick() { for (auto& m : modules) m->tick(); }
+    virtual void render() {}
+    virtual bool hasRender() const { return false; }
+
+    std::vector<std::shared_ptr<Module>> modules;
+    bool attached = false;
+
+    std::shared_ptr<Module> addModule(const std::string& n, const std::string& c){
+        auto m=std::make_shared<Module>(n,c); modules.push_back(m); return m;
+    }
+    void clearModules(){ modules.clear(); }
+};
+
+#pragma once
+#include "game.hpp"
+#include <memory>
+#include <vector>
+
+class GameManager {
+public:
+    static GameManager& get(){ static GameManager g; return g; }
+    void init();
+    void tickAll();
+    void renderAll();
+
+    std::vector<std::shared_ptr<IGame>> games;
+    std::shared_ptr<IGame> active;
+};
+
+
+#include "game_manager.hpp"
+#include "../overlay/overlay.hpp"
+#include "../util/log.hpp"
+#if defined(NF_FORTNITE)
+  #include "../games/fortnite.hpp"
+#endif
+#if defined(NF_COD)
+  #include "../games/cod.hpp"
+#endif
+#if defined(NF_MINECRAFT)
+  #include "../games/minecraft_bridge.hpp"
+#endif
+
+void GameManager::init() {
+#if defined(NF_FORTNITE)
+    games.push_back(std::make_shared<FortniteGame>());
+#endif
+#if defined(NF_COD)
+    games.push_back(std::make_shared<CodGame>());
+#endif
+#if defined(NF_MINECRAFT)
+    games.push_back(std::make_shared<MinecraftGame>());
+#endif
+    if (!games.empty()) active = games.front();
+}
+
+void GameManager::tickAll() {
+    static ULONGLONG last = 0;
+    ULONGLONG now = GetTickCount64();
+    bool detect = (now - last) > 1000;
+    if (detect) last = now;
+
+    for (auto& g : games) {
+        if (detect) {
+            if (!g->attached && g->isRunning()) {
+                if (g->attach()) {
+                    g->attached = true;
+                    active = g;
+                    Overlay::get().setTitle(std::string("Neo Flier - ") + g->name());
+                    Log::info(std::string("Attached: ") + g->name());
+                }
+            } else if (g->attached && !g->isRunning()) {
+                g->detach(); g->attached = false;
+                Log::info(std::string("Detached: ") + g->name());
+                if (active == g && !games.empty()) active = games.front();
+            }
+        }
+        if (g->attached) g->tick();
+    }
+}
+
+void GameManager::renderAll() {
+    for (auto& g : games) if (g->attached && g->hasRender()) g->render();
+}
+
+
+#pragma once
+#include <windows.h>
+#include <d3d11.h>
+#include <string>
+
+int OverlayW();
+int OverlayH();
+
+class Overlay {
+public:
+    static Overlay& get(){ static Overlay o; return o; }
+    bool create(HINSTANCE hInst);
+    void run();
+    void destroy();
+    void setClickThrough(bool on);
+    void setTitle(const std::string& t);
+
+    HWND hwnd=nullptr; int width=0, height=0; bool menuOpen=true;
+private:
+    HINSTANCE hInst=nullptr;
+    ID3D11Device* device=nullptr;
+    ID3D11DeviceContext* ctx=nullptr;
+    IDXGISwapChain* swap=nullptr;
+    ID3D11RenderTargetView* rtv=nullptr;
+    bool running=true, clickThrough=false;
+    static LRESULT CALLBACK wndProc(HWND,UINT,WPARAM,LPARAM);
+    bool initD3D();
+    void createRT();
+    void cleanupRT();
+};
+
+
+#include "overlay.hpp"
+#include "../ui/menu.hpp"
+#include "../core/game_manager.hpp"
+#include "../util/log.hpp"
+#include <d3d11.h>
+#include <imgui.h>
+#include <imgui_impl_win32.h>
+#include <imgui_impl_dx11.h>
+#include <cstring>
+
+#ifndef NF_TITLE
+#define NF_TITLE "Neo Flier"
+#endif
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND,UINT,WPARAM,LPARAM);
+
+int OverlayW(){ return Overlay::get().width; }
+int OverlayH(){ return Overlay::get().height; }
+
+LRESULT CALLBACK Overlay::wndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (ImGui_ImplWin32_WndProcHandler(h,m,w,l)) return true;
+    switch (m) {
+        case WM_DESTROY: PostQuitMessage(0); return 0;
+        case WM_SIZE:
+            if (Overlay::get().device && w) {
+                Overlay::get().cleanupRT();
+                Overlay::get().swap->ResizeBuffers(0,(UINT)LOWORD(l),(UINT)HIWORD(l),
+                    DXGI_FORMAT_UNKNOWN,0);
+                Overlay::get().createRT();
+            }
+            return 0;
+    }
+    return DefWindowProc(h,m,w,l);
+}
+
+bool Overlay::create(HINSTANCE hI) {
+    hInst = hI;
+    width  = GetSystemMetrics(SM_CXSCREEN);
+    height = GetSystemMetrics(SM_CYSCREEN);
+
+    WNDCLASSEXW wc{ sizeof(wc) };
+    wc.lpfnWndProc = wndProc;
+    wc.hInstance = hI;
+    wc.lpszClassName = L"NeoFlier";
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    RegisterClassExW(&wc);
+
+    std::wstring title(NF_TITLE, NF_TITLE + std::strlen(NF_TITLE));
+
+    hwnd = CreateWindowExW(WS_EX_TOPMOST|WS_EX_LAYERED, L"NeoFlier", title.c_str(),
+        WS_POPUP, 0,0,width,height, nullptr,nullptr,hI,nullptr);
+    if (!hwnd) return false;
+    SetLayeredWindowAttributes(hwnd,0,255,LWA_ALPHA);
+    ShowWindow(hwnd,SW_SHOW);
+
+    if (!initD3D()) return false;
+
+    IMGUI_CHECKVERSION(); ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+    ImGui_ImplWin32_Init(hwnd);
+    ImGui_ImplDX11_Init(device, ctx);
+    setClickThrough(false);
+    return true;
+}
+
+bool Overlay::initD3D() {
+    DXGI_SWAP_CHAIN_DESC sd{};
+    sd.BufferCount=2;
+    sd.BufferDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow=hwnd;
+    sd.SampleDesc.Count=1;
+    sd.Windowed=TRUE;
+    sd.SwapEffect=DXGI_SWAP_EFFECT_DISCARD;
+
+    const D3D_FEATURE_LEVEL want[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
+    if (FAILED(D3D11CreateDeviceAndSwapChain(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,0,
+        want,2,D3D11_SDK_VERSION,&sd,&swap,&device,nullptr,&ctx))) return false;
+    createRT();
+    return true;
+}
+void Overlay::createRT() {
+    ID3D11Texture2D* back=nullptr;
+    swap->GetBuffer(0,__uuidof(ID3D11Texture2D),(void**)&back);
+    device->CreateRenderTargetView(back,nullptr,&rtv);
+    back->Release();
+}
+void Overlay::cleanupRT(){ if(rtv){rtv->Release();rtv=nullptr;} }
+
+void Overlay::setClickThrough(bool on) {
+    clickThrough = on;
+    LONG ex = GetWindowLong(hwnd, GWL_EXSTYLE);
+    if (on) ex |=  WS_EX_TRANSPARENT; else ex &= ~WS_EX_TRANSPARENT;
+    SetWindowLong(hwnd, GWL_EXSTYLE, ex);
+}
+
+void Overlay::setTitle(const std::string& t) {
+    std::wstring w(t.begin(), t.end());
+    if (hwnd) SetWindowTextW(hwnd, w.c_str());
+}
+
+void Overlay::run() {
+    MSG msg{};
+    bool lastInsert=false;
+    while (running) {
+        while (PeekMessage(&msg,nullptr,0,0,PM_REMOVE)) {
+            TranslateMessage(&msg); DispatchMessage(&msg);
+            if (msg.message==WM_QUIT) running=false;
+        }
+        bool ins = (GetAsyncKeyState(VK_INSERT)&0x8000)!=0;
+        if (ins && !lastInsert) { menuOpen=!menuOpen; setClickThrough(!menuOpen); }
+        lastInsert=ins;
+
+        GameManager::get().tickAll();
+
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+
+        if (menuOpen) Menu::render();
+        GameManager::get().renderAll();
+
+        if (GameManager::get().active && GameManager::get().active->attached) {
+            char buf[128];
+            snprintf(buf,sizeof(buf),"Neo Flier  v1.0  |  %s",
+                GameManager::get().active->name());
+            ImGui::GetForegroundDrawList()->AddText({12,12},
+                IM_COL32(0,229,255,255), buf);
+        }
+
+        ImGui::Render();
+        const float clear[4]={0,0,0,0};
+        ctx->OMSetRenderTargets(1,&rtv,nullptr);
+        ctx->ClearRenderTargetView(rtv,clear);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        swap->Present(1,0);
+    }
+}
+
+void Overlay::destroy() {
+    ImGui_ImplDX11_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
+    cleanupRT();
+    if (swap) swap->Release();
+    if (ctx) ctx->Release();
+    if (device) device->Release();
+    if (hwnd) DestroyWindow(hwnd);
+}
+
+
+#pragma once
+class Menu { public: static void render(); };
+
+
+#include "menu.hpp"
+#include "../core/game_manager.hpp"
+#include "../util/log.hpp"
+#include <imgui.h>
+#include <map>
+#include <vector>
+
+void Menu::render() {
+    ImGui::SetNextWindowSize({560,700}, ImGuiCond_FirstUseEver);
+    ImGui::Begin("Neo Flier", nullptr, ImGuiWindowFlags_NoCollapse);
+
+    ImGui::BeginChild("##side", {150,0}, true);
+    for (auto& g : GameManager::get().games) {
+        bool sel = (g == GameManager::get().active);
+        std::string label = std::string(g->name()) + (g->attached ? "  *" : "");
+        if (ImGui::Selectable(label.c_str(), sel)) GameManager::get().active = g;
+    }
+    ImGui::EndChild();
+    ImGui::SameLine();
+
+    ImGui::BeginChild("##main", {0,0});
+    auto game = GameManager::get().active;
+    if (game) {
+        if (!game->attached) ImGui::TextDisabled("not attached");
+        std::map<std::string, std::vector<std::shared_ptr<Module>>> cats;
+        for (auto& m : game->modules) cats[m->category].push_back(m);
+
+        for (auto& [cat, mods] : cats) {
+            if (ImGui::CollapsingHeader(cat.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                for (auto& m : mods) {
+                    ImGui::PushID(m.get());
+                    ImGui::Checkbox(m->name.c_str(), &m->enabled);
+                    for (auto& s : m->settings) {
+                        ImGui::PushID(s.get());
+                        switch (s->type) {
+                            case SettingType::Bool:  ImGui::Checkbox(s->name.c_str(), &s->b); break;
+                            case SettingType::Int:   ImGui::SliderInt(s->name.c_str(), &s->i, (int)s->min, (int)s->max); break;
+                            case SettingType::Float: ImGui::SliderFloat(s->name.c_str(), &s->f, s->min, s->max); break;
+                            case SettingType::Enum: {
+                                std::vector<const char*> o;
+                                for (auto& x : s->options) o.push_back(x.c_str());
+                                if (!o.empty())
+                                    ImGui::Combo(s->name.c_str(), &s->enumIndex, o.data(), (int)o.size());
+                                break; }
+                        }
+                        ImGui::PopID();
+                    }
+                    if (m->onMenu) m->onMenu(*m);
+                    ImGui::PopID();
+                }
+            }
+        }
+    }
+    if (ImGui::CollapsingHeader("Log")) {
+        for (auto& l : Log::lines()) ImGui::TextUnformatted(l.c_str());
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+#pragma once
+#include <cstdint>
+#include <string>
+#include "../util/memory.hpp"
+
+class FNamePool {
+public:
+    bool init(Memory& mem);
+    int32_t find(Memory& mem, const std::string& name);
+    int32_t add(Memory& mem, const std::string& name);
+private:
+    uintptr_t pool = 0;
+    static constexpr uint32_t BLOCK = 0x10000;
+    static constexpr uint32_t STRIDE = 2050;
+};
+
+
+
+#include "fname.hpp"
+#include "../util/log.hpp"
+
+bool FNamePool::init(Memory& mem) {
+    auto hit = mem.patternScanModule("48 8D 0D ? ? ? ? E8 ? ? ? ? 48 8B D8");
+    if (!hit) { Log::warn("GNames pattern not found"); return false; }
+    uintptr_t instr = *hit;
+    int32_t rel = mem.read<int32_t>(instr + 3);
+    pool = instr + 7 + rel;
+    Log::info("FNamePool @ 0x" + std::to_string(pool));
+    return pool != 0;
+}
+
+int32_t FNamePool::find(Memory& mem, const std::string& name) {
+    if (!pool) return -1;
+    uint32_t curBlock  = mem.read<uint32_t>(pool + 0x8);
+    uint32_t curCursor = mem.read<uint32_t>(pool + 0xC);
+    for (uint32_t b = 0; b <= curBlock; ++b) {
+        uintptr_t block = mem.readPtr(pool + 0x10 + (uintptr_t)b * 8);
+        if (!block) continue;
+        uint32_t limit = (b == curBlock) ? curCursor : BLOCK;
+        for (uint32_t off = 0; off + STRIDE <= limit; off += STRIDE) {
+            uint16_t h = mem.read<uint16_t>(block + off);
+            int len = h >> 1; bool wide = h & 1;
+            if (len <= 0 || len > 1023) continue;
+            std::string s;
+            if (wide) {
+                for (int i = 0; i < len; ++i)
+                    s += (char)mem.read<uint16_t>(block + off + 2 + i * 2);
+            } else {
+                s = mem.readString(block + off + 2, len);
+            }
+            if (s == name) return (int32_t)((b << 16) + (off / STRIDE));
+        }
+    }
+    return -1;
+}
+
+int32_t FNamePool::add(Memory& mem, const std::string& name) {
+    if (!pool) return -1;
+    uint32_t b   = mem.read<uint32_t>(pool + 0x8);
+    uint32_t off = mem.read<uint32_t>(pool + 0xC);
+    uintptr_t block = mem.readPtr(pool + 0x10 + (uintptr_t)b * 8);
+    if (!block || off + STRIDE > BLOCK) {
+        b++; off = 0;
+        block = mem.readPtr(pool + 0x10 + (uintptr_t)b * 8);
+        mem.write<uint32_t>(pool + 0x8, b);
+    }
+    uintptr_t entry = block + off;
+    mem.write<uint16_t>(entry, (uint16_t)(name.size() << 1));
+    mem.writeBytes(entry + 2, name.data(), name.size());
+    uint32_t next = off + STRIDE;
+    if (next + STRIDE > BLOCK) { mem.write<uint32_t>(pool + 0x8, b + 1); mem.write<uint32_t>(pool + 0xC, 0); }
+    else                        mem.write<uint32_t>(pool + 0xC, next);
+    return (int32_t)((b << 16) + (off / STRIDE));
+}
+
+
+#pragma once
+#include "../core/game.hpp"
+#include "../util/memory.hpp"
+#include "../util/math.hpp"
+#include "fname.hpp"
+#include <map>
+#include <vector>
+#include <string>
+
+struct Skin { std::string name, cid; };
+
+class FortniteGame : public IGame {
+public:
+    const char* name() const override { return "Fortnite"; }
+    bool isRunning() override { return Memory::findPid(EXE) != 0; }
+    bool attach() override;
+    void detach() override { mem.detach(); clearModules(); }
+    void tick() override { updateCache(); IGame::tick(); }
+    void render() override;
+    bool hasRender() const override { return true; }
+
+    static constexpr const wchar_t* EXE = L"FortniteClient-Win64-Shipping.exe";
+    Memory mem;
+    FNamePool fnames;
+
+    uintptr_t uworld=0, localPC=0, localPS=0, camMgr=0;
+    std::vector<uintptr_t> playerStates;
+
+    std::map<std::string, std::vector<Skin>> cosmetics;
+    std::string selectedSkin, selectedSkinName;
+    std::string picked, pickedName;
+    bool dirty=false;
+    int cuTick=0, skinTick=0;
+
+private:
+    void buildModules();
+    void updateCache();
+    FVector camLocation() const;
+    FRotator camRotation() const;
+    FVector pawnLoc(uintptr_t pawn) const;
+    void applyCosmetic(const std::string& path, uintptr_t fieldOff);
+};
+
+
+#include "fortnite.hpp"
+#include "../overlay/overlay.hpp"
+#include "../util/log.hpp"
+#include <imgui.h>
+#include <fstream>
+
+namespace off {
+    constexpr uintptr_t UWorld             = 0x0;
+    constexpr uintptr_t OwningGameInstance = 0x0;
+    constexpr uintptr_t LocalPlayers       = 0x0;
+    constexpr uintptr_t PlayerController   = 0x0;
+    constexpr uintptr_t PlayerState        = 0x0;
+    constexpr uintptr_t PawnPrivate        = 0x0;
+    constexpr uintptr_t PlayerCameraManager= 0x0;
+    constexpr uintptr_t ControlRotation    = 0x0;
+    constexpr uintptr_t GameState          = 0x0;
+    constexpr uintptr_t PlayerArray        = 0x0;
+    constexpr uintptr_t RootComponent      = 0x0;
+    constexpr uintptr_t RelativeLocation   = 0x0;
+    constexpr uintptr_t CameraCache        = 0x0;
+    constexpr uintptr_t Customization      = 0x0;
+    constexpr uintptr_t SeasonLevelUIDisplay = 0x0;
+}
+namespace lo {
+    constexpr uintptr_t Character = 0x00;
+    constexpr uintptr_t Backpack  = 0x20;
+    constexpr uintptr_t Pickaxe   = 0x40;
+    constexpr uintptr_t Glider    = 0x60;
+    constexpr uintptr_t Contrail  = 0x80;
+    constexpr uintptr_t MusicPack = 0xA0;
+}
+constexpr uintptr_t POV_LOCATION = 0x10;
+constexpr uintptr_t POV_ROTATION = 0x28;
+
+static std::map<std::string, std::vector<Skin>> loadCosmetics(const std::string& path) {
+    std::map<std::string, std::vector<Skin>> out;
+    std::ifstream f(path); if (!f) return out;
+    std::string s((std::istreambuf_iterator<char>(f)), {});
+    for (const char* key : {"character","backpack","pickaxe","glider","contrail","music"}) {
+        auto k = s.find(std::string("\"") + key + "\"");
+        if (k == std::string::npos) continue;
+        auto start = s.find('[', k), end = s.find(']', start);
+        if (start == std::string::npos || end == std::string::npos) continue;
+        std::string block = s.substr(start, end - start);
+        auto grab = [&](const char* fld, size_t from) -> std::pair<std::string,size_t> {
+            auto kk = block.find(std::string("\"") + fld + "\"", from);
+            if (kk == std::string::npos) return {"", std::string::npos};
+            auto c = block.find(':', kk), q1 = block.find('"', c+1), q2 = block.find('"', q1+1);
+            return { block.substr(q1+1, q2-q1-1), q2 };
+        };
+        size_t p = 0;
+        while (true) {
+            auto [name, np] = grab("name", p); if (np == std::string::npos) break;
+            auto [cid, cp]  = grab("cid", np);  if (cp == std::string::npos) break;
+            out[key].push_back({name, cid}); p = cp;
+        }
+    }
+    return out;
+}
+
+static void writeFName(Memory& mem, uintptr_t a, int32_t idx) {
+    mem.write<int32_t>(a, idx); mem.write<uint32_t>(a + 4, 0);
+}
+
+bool FortniteGame::attach() {
+    if (!mem.attach(EXE)) return false;
+    fnames.init(mem);
+    char appdata[MAX_PATH];
+    SHGetFolderPathA(nullptr, CSIDL_APPDATA, nullptr, 0, appdata);
+    cosmetics = loadCosmetics(std::string(appdata) + "\\NeoFlier\\skins.json");
+    buildModules();
+    return true;
+}
+
+void FortniteGame::updateCache() {
+    uworld = mem.readPtr(mem.base + off::UWorld);
+    if (!uworld) return;
+    auto gi = mem.readPtr(uworld + off::OwningGameInstance);
+    auto lp = gi ? mem.readPtr(gi + off::LocalPlayers) : 0;
+    auto lplayer = lp ? mem.readPtr(lp) : 0;
+    localPC = lplayer ? mem.readPtr(lplayer + off::PlayerController) : 0;
+    if (localPC) {
+        localPS = mem.readPtr(localPC + off::PlayerState);
+        camMgr  = mem.readPtr(localPC + off::PlayerCameraManager);
+    }
+    playerStates.clear();
+    auto gs = mem.readPtr(uworld + off::GameState);
+    if (gs) {
+        auto arr = gs + off::PlayerArray;
+        auto data = mem.readPtr(arr);
+        int count = mem.read<int>(arr + 8);
+        for (int i = 0; i < count && i < 100; ++i) {
+            auto ps = mem.readPtr(data + (uintptr_t)i * 8);
+            if (ps) playerStates.push_back(ps);
+        }
+    }
+}
+
+FVector FortniteGame::camLocation() const {
+    return mem.read<FVector>(camMgr + off::CameraCache + POV_LOCATION);
+}
+FRotator FortniteGame::camRotation() const {
+    return mem.read<FRotator>(camMgr + off::CameraCache + POV_ROTATION);
+}
+FVector FortniteGame::pawnLoc(uintptr_t pawn) const {
+    auto root = mem.readPtr(pawn + off::RootComponent);
+    return root ? mem.read<FVector>(root + off::RelativeLocation) : FVector{};
+}
+
+void FortniteGame::applyCosmetic(const std::string& path, uintptr_t fieldOff) {
+    auto dot = path.rfind('.'); if (dot == std::string::npos) return;
+    std::string pkg = path.substr(0, dot), asset = path.substr(dot + 1);
+    int32_t pi = fnames.find(mem, pkg);   if (pi < 0) pi = fnames.add(mem, pkg);
+    int32_t ai = fnames.find(mem, asset); if (ai < 0) ai = fnames.add(mem, asset);
+    if (pi < 0 || ai < 0) return;
+
+    auto ps = mem.readPtr(localPC + off::PlayerState);
+    if (!ps) return;
+    uintptr_t loadout = mem.readPtr(ps + off::Customization);
+    if (!loadout) return;
+
+    writeFName(mem, loadout + fieldOff,     pi);
+    writeFName(mem, loadout + fieldOff + 8, ai);
+    mem.write<int64_t>(loadout + fieldOff + 0x10, 0);
+    mem.write<int64_t>(loadout + fieldOff + 0x18, 0);
+}
+
+void FortniteGame::buildModules() {
+    auto aim = addModule("Aimbot", "Combat");
+    auto fov = aim->addSetting(SettingType::Float, "FOV"); fov->f=8; fov->min=1; fov->max=90;
+    auto sm  = aim->addSetting(SettingType::Float, "Smoothing"); sm->f=3; sm->min=1; sm->max=20;
+    aim->key = VK_XBUTTON2;
+    aim->onTick = [this, fov, sm](Module& m) {
+        if (!localPC || !camMgr) return;
+        FVector cam = camLocation(); FRotator cur = camRotation();
+        uintptr_t best=0; double bestFov=fov->f;
+        for (auto ps : playerStates) {
+            if (ps==localPS) continue;
+            auto pawn = mem.readPtr(ps + off::PawnPrivate);
+            if (!pawn) continue;
+            FVector head = pawnLoc(pawn); head.Z += 70;
+            double f = angleDist(cur, calcAngle(cam, head));
+            if (f < bestFov) { bestFov=f; best=ps; }
+        }
+        if (!best) return;
+        if (GetAsyncKeyState(m.key) & 0x8000) {
+            auto pawn = mem.readPtr(best + off::PawnPrivate);
+            FVector head = pawnLoc(pawn); head.Z += 70;
+            FRotator want = calcAngle(cam, head);
+            want.Pitch = cur.Pitch + (want.Pitch-cur.Pitch)/sm->f;
+            want.Yaw   = cur.Yaw   + normAngle(want.Yaw-cur.Yaw)/sm->f;
+            mem.write<FRotator>(localPC + off::ControlRotation, want);
+        }
+    };
+
+    auto esp = addModule("ESP", "Visuals");
+    esp->onRender = [this](Module&) {
+        if (!camMgr) return;
+        auto* dl = ImGui::GetForegroundDrawList();
+        FVector cam = camLocation(); FRotator rot = camRotation();
+        for (auto ps : playerStates) {
+            if (ps==localPS) continue;
+            auto pawn = mem.readPtr(ps + off::PawnPrivate);
+            if (!pawn) continue;
+            FVector feet = pawnLoc(pawn);
+            FVector head = feet; head.Z += 72;
+            FVector2 sFeet, sHead;
+            if (!worldToScreen(feet, cam, rot, 80, OverlayW(), OverlayH(), sFeet)) continue;
+            if (!worldToScreen(head, cam, rot, 80, OverlayW(), OverlayH(), sHead)) continue;
+            float h = sFeet.Y - sHead.Y, w = h*0.5f;
+            dl->AddRect({sHead.X-w/2, sHead.Y}, {sHead.X+w/2, sFeet.Y},
+                        IM_COL32(0,255,255,220), 0, 0, 1.6f);
+            dl->AddLine({OverlayW()/2.f, (float)OverlayH()}, {sFeet.X, sFeet.Y},
+                        IM_COL32(255,60,60,180));
+        }
+    };
+
+    auto cu = addModule("CosmeticUnlocker", "Cosmetics");
+    auto slot = cu->addSetting(SettingType::Enum, "Slot");
+    slot->options = { "Character", "Backpack", "Pickaxe", "Glider", "Contrail", "MusicPack" };
+    static const uintptr_t slotOff[] = { lo::Character, lo::Backpack, lo::Pickaxe,
+                                         lo::Glider, lo::Contrail, lo::MusicPack };
+    static const char* slotKey[] = { "character","backpack","pickaxe","glider","contrail","music" };
+    cu->onTick = [this, slot, cu](Module&) {
+        if (picked.empty()) return;
+        if (dirty || ++cuTick % 30 == 0) { applyCosmetic(picked, slotOff[slot->enumIndex]); dirty=false; }
+    };
+    cu->onMenu = [this, slot](Module&) {
+        auto it = cosmetics.find(slotKey[slot->enumIndex]);
+        if (it == cosmetics.end()) { ImGui::TextDisabled("no skins.json loaded"); return; }
+        static char filter[64] = "";
+        ImGui::InputText("Search", filter, sizeof(filter));
+        ImGui::BeginChild("##cos", {0, 200}, true);
+        for (auto& s : it->second) {
+            if (filter[0] && s.name.find(filter) == std::string::npos) continue;
+            if (ImGui::Selectable(s.name.c_str(), s.name == pickedName)) {
+                pickedName = s.name; picked = s.cid; dirty = true;
+            }
+        }
+        ImGui::EndChild();
+        ImGui::TextDisabled("%d items", (int)it->second.size());
+    };
+
+    auto lvl = addModule("LevelSpoofer", "Account");
+    auto lv  = lvl->addSetting(SettingType::Int, "Level"); lv->i = 100; lv->min = 1; lv->max = 999;
+    lvl->onTick = [this, lv](Module&) {
+        auto ps = mem.readPtr(localPC + off::PlayerState);
+        if (ps) mem.write<int32_t>(ps + off::SeasonLevelUIDisplay, lv->i);
+    };
+}
+
+void FortniteGame::render() { for (auto& m : modules) m->render(); }
+
+
+#pragma once
+#include "../core/game.hpp"
+#include "../util/memory.hpp"
+#include "../util/math.hpp"
+#include <vector>
+
+class CodGame : public IGame {
+public:
+    const char* name() const override { return "Call of Duty"; }
+    bool isRunning() override;
+    bool attach() override;
+    void detach() override { mem.detach(); clearModules(); }
+    void tick() override;
+    void render() override;
+    bool hasRender() const override { return true; }
+
+    Memory mem;
+    uintptr_t world=0, localPC=0, camMgr=0, decryptKey=0;
+    std::vector<uintptr_t> entities;
+
+private:
+    void buildModules();
+    void updateCache();
+    uintptr_t decryptWorld(uintptr_t enc) const;
+    FVector entLoc(uintptr_t e) const;
+    FVector camLocation() const;
+    FRotator camRotation() const;
+};
+
+
+#include "cod.hpp"
+#include "../overlay/overlay.hpp"
+#include <imgui.h>
+#include <intrin.h>
+
+namespace cod_off {
+    constexpr uintptr_t WorldEncrypted = 0x0;
+    constexpr uintptr_t DecryptKey     = 0x0;
+    constexpr uintptr_t LocalPC        = 0x0;
+    constexpr uintptr_t CamMgr         = 0x0;
+    constexpr uintptr_t CamLocation    = 0x0;
+    constexpr uintptr_t CamRotation    = 0x0;
+    constexpr uintptr_t EntityList     = 0x0;
+    constexpr uintptr_t EntityPos      = 0x0;
+}
+static const wchar_t* COD_EXES[] = { L"cod.exe", L"ModernWarfare.exe", L"BlackOps6.exe" };
+
+bool CodGame::isRunning() {
+    for (auto e : COD_EXES) if (Memory::findPid(e)) return true;
+    return false;
+}
+
+bool CodGame::attach() {
+    for (auto e : COD_EXES)
+        if (mem.attach(e)) { buildModules(); return true; }
+    return false;
+}
+
+uintptr_t CodGame::decryptWorld(uintptr_t enc) const {
+    return _rotl64(enc, 0x1B) ^ decryptKey;
+}
+
+void CodGame::updateCache() {
+    auto enc = mem.readPtr(mem.base + cod_off::WorldEncrypted);
+    world = enc ? decryptWorld(enc) : 0;
+    if (!world) return;
+    localPC = mem.readPtr(world + cod_off::LocalPC);
+    if (localPC) camMgr = mem.readPtr(localPC + cod_off::CamMgr);
+}
+
+FVector CodGame::entLoc(uintptr_t e) const { return mem.read<FVector>(e + cod_off::EntityPos); }
+FVector CodGame::camLocation() const { return camMgr ? mem.read<FVector>(camMgr + cod_off::CamLocation) : FVector{}; }
+FRotator CodGame::camRotation() const { return camMgr ? mem.read<FRotator>(camMgr + cod_off::CamRotation) : FRotator{}; }
+
+void CodGame::buildModules() {
+    addModule("Aimbot", "Combat");
+    auto esp = addModule("ESP", "Visuals");
+    esp->onRender = [this](Module&) {
+        if (!camMgr || !world) return;
+        auto* dl = ImGui::GetForegroundDrawList();
+        FVector cam = camLocation(); FRotator rot = camRotation();
+        for (auto e : entities) {
+            FVector p = entLoc(e);
+            FVector2 s;
+            if (!worldToScreen(p, cam, rot, 80, OverlayW(), OverlayH(), s)) continue;
+            dl->AddRect({s.X-20,s.Y-40},{s.X+20,s.Y}, IM_COL32(255,255,0,220));
+        }
+    };
+}
+
+void CodGame::tick() { updateCache(); IGame::tick(); }
+void CodGame::render() { for (auto& m : modules) m->render(); }
+
+
+
+#pragma once
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include "../core/game.hpp"
+#include "../util/memory.hpp"
+#include <string>
+
+class MinecraftGame : public IGame {
+public:
+    const char* name() const override { return "Minecraft"; }
+    bool isRunning() override { return Memory::findPid(L"javaw.exe") != 0; }
+    bool attach() override;
+    void detach() override;
+    void tick() override;
+
+    SOCKET sock = INVALID_SOCKET;
+private:
+    void requestList();
+    void sendLine(const std::string& s);
+    std::string recvLine();
+    ULONGLONG lastSync = 0;
+};
+
+
+#include "minecraft_bridge.hpp"
+#include "../util/log.hpp"
+#include <sstream>
+
+bool MinecraftGame::attach() {
+    WSADATA w; WSAStartup(MAKEWORD(2,2), &w);
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(25566);
+    a.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (connect(sock, (sockaddr*)&a, sizeof(a)) != 0) {
+        closesocket(sock); sock = INVALID_SOCKET; return false;
+    }
+    requestList();
+    return !modules.empty();
+}
+
+void MinecraftGame::detach() {
+    if (sock != INVALID_SOCKET) closesocket(sock);
+    sock = INVALID_SOCKET; clearModules();
+}
+
+void MinecraftGame::sendLine(const std::string& s) {
+    std::string l = s + "\n";
+    send(sock, l.c_str(), (int)l.size(), 0);
+}
+std::string MinecraftGame::recvLine() {
+    std::string out; char c;
+    while (recv(sock, &c, 1, 0) == 1 && c != '\n') out += c;
+    return out;
+}
+
+void MinecraftGame::requestList() {
+    clearModules();
+    sendLine("LIST");
+    std::shared_ptr<Module> cur;
+    while (true) {
+        std::string line = recvLine();
+        if (line.empty() || line == "ENDLIST") break;
+        std::istringstream ss(line);
+        std::string tag; ss >> tag;
+        if (tag == "MODULE") {
+            std::string name, cat; ss >> name >> cat;
+            cur = addModule(name, cat);
+        } else if (tag == "SETTING" && cur) {
+            std::string mn, sn, type; ss >> mn >> sn >> type;
+            SettingType t = type=="bool"?SettingType::Bool
+                          : type=="int" ?SettingType::Int
+                          : type=="float"?SettingType::Float:SettingType::Enum;
+            auto s = cur->addSetting(t, sn);
+            if (t==SettingType::Float) ss >> s->f >> s->min >> s->max;
+            else if (t==SettingType::Int) ss >> s->i >> s->min >> s->max;
+        }
+    }
+    Log::info("Minecraft modules: " + std::to_string(modules.size()));
+}
+
+void MinecraftGame::tick() {
+    if (sock == INVALID_SOCKET) return;
+    ULONGLONG now = GetTickCount64();
+    if (now - lastSync < 250) return;
+    lastSync = now;
+    for (auto& m : modules) {
+        sendLine("SET " + m->name + " " + (m->enabled ? "true" : "false"));
+        for (auto& s : m->settings)
+            sendLine("SET " + m->name + "." + s->name + " " + s->valueString());
+    }
+}
