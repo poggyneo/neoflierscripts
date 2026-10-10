@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>neoflierscripts — download the Neo Flier client</title>
+<meta name="description" content="Pick your game and install the Neo Flier client. Fortnite, Call of Duty, Minecraft.">
+<style>
+:root{
+  --bg:#070b12; --panel:#0d131c; --panel2:#111a25; --line:#1c2937;
+  --txt:#dbe7f3; --dim:#7c8ea3; --cyan:#00e5ff; --green:#3ce08a;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:"Inter",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--txt);font-family:var(--sans);line-height:1.6}
+a{color:var(--cyan);text-decoration:none}
+.wrap{max-width:1120px;margin:0 auto;padding:0 22px}
+header{position:sticky;top:0;z-index:20;background:rgba(7,11,18,.85);
+  backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+nav{display:flex;align-items:center;justify-content:space-between;height:62px}
+.logo{font-family:var(--mono);font-weight:700;font-size:18px;letter-spacing:.5px}
+.logo b{color:var(--cyan)}
+.navlinks{display:flex;gap:26px;font-size:14px}
+.navlinks a{color:var(--dim)}
+.navlinks a:hover{color:var(--cyan)}
+@media(max-width:640px){.navlinks{display:none}}
+.hero{padding:78px 0 44px;text-align:center;position:relative;overflow:hidden}
+.hero:before{content:"";position:absolute;inset:-40% 30% auto;height:420px;
+  background:radial-gradient(closest-side,rgba(0,229,255,.18),transparent);filter:blur(20px)}
+.hero h1{font-size:clamp(30px,5vw,52px);margin:0 0 14px;letter-spacing:-.5px;position:relative}
+.hero h1 span{color:var(--cyan)}
+.hero p{color:var(--dim);max-width:620px;margin:0 auto 26px;position:relative}
+.cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;position:relative}
+.btn{display:inline-flex;align-items:center;gap:9px;padding:12px 22px;border-radius:9px;
+  font-family:var(--mono);font-size:14px;font-weight:600;cursor:pointer;border:1px solid transparent;
+  transition:.15s;background:none;color:inherit}
+.btn.primary{background:var(--cyan);color:#04121a}
+.btn.primary:hover{box-shadow:0 0 26px rgba(0,229,255,.45);transform:translateY(-1px)}
+.btn.ghost{border-color:var(--line);color:var(--txt)}
+.btn.ghost:hover{border-color:var(--cyan);color:var(--cyan)}
+section{padding:52px 0}
+h2{font-family:var(--mono);font-size:22px;margin:0 0 8px}
+.sub{color:var(--dim);margin:0 0 26px;font-size:15px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+.card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);
+  border-radius:14px;padding:22px;display:flex;flex-direction:column;transition:.18s}
+.card:hover{border-color:var(--cyan);transform:translateY(-3px)}
+.card.active{border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan),0 12px 40px rgba(0,229,255,.12)}
+.tag{font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:1.4px;text-transform:uppercase}
+.card h3{font-family:var(--mono);font-size:19px;margin:8px 0 12px}
+.card ul{margin:0 0 18px;padding:0;list-style:none;font-size:14px;color:var(--dim)}
+.card li{padding:3px 0 3px 20px;position:relative}
+.card li:before{content:"▸";position:absolute;left:0;color:var(--cyan)}
+.card .btn{margin-top:auto;justify-content:center}
+.meta{font-family:var(--mono);font-size:12px;color:var(--dim);margin-bottom:12px}
+.steps{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px}
+.steps ol{margin:0;padding-left:22px}
+.steps li{margin:12px 0}
+code,pre{font-family:var(--mono);font-size:13px}
+code{background:#0a121b;border:1px solid var(--line);padding:2px 7px;border-radius:6px;color:var(--cyan)}
+pre{background:#0a121b;border:1px solid var(--line);border-radius:10px;padding:16px;overflow:auto;position:relative}
+pre .copy{position:absolute;top:10px;right:10px;font-family:var(--mono);font-size:11px;
+  background:var(--panel2);border:1px solid var(--line);color:var(--dim);padding:5px 10px;
+  border-radius:6px;cursor:pointer}
+pre .copy:hover{color:var(--cyan);border-color:var(--cyan)}
+.req{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+@media(max-width:700px){.req{grid-template-columns:1fr}}
+.req div{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;font-size:14px;color:var(--dim)}
+.req strong{color:var(--txt);display:block;margin-bottom:4px;font-family:var(--mono);font-size:13px}
+details{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:10px}
+details summary{cursor:pointer;font-family:var(--mono);font-size:14px;color:var(--txt)}
+details p{color:var(--dim);font-size:14px;margin:12px 0 0}
+footer{border-top:1px solid var(--line);padding:30px 0;color:var(--dim);font-size:13px;text-align:center}
+footer .logo{margin-bottom:8px}
+.warn{font-family:var(--mono);font-size:12px;color:var(--dim);text-align:center;padding-top:8px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <nav>
+      <div class="logo">neo<b>flier</b>scripts</div>
+      <div class="navlinks">
+        <a href="#clients">Clients</a>
+        <a href="#install">Install</a>
+        <a href="#req">Requirements</a>
+        <a href="#faq">FAQ</a>
+      </div>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<section class="hero wrap">
+  <h1>Download the <span>Neo Flier</span> client</h1>
+  <p>External, user-mode, handle-hijacked. Pick your game, install in one line, press INSERT.
+     No driver, no injection, no nonsense.</p>
+  <div class="cta">
+    <button class="btn primary" onclick="scrollToClients()">Choose your game</button>
+    <a class="btn ghost" href="#install">Install guide</a>
+  </div>
+</section>
+
+<section id="clients" class="wrap">
+  <h2>Choose a client</h2>
+  <p class="sub">Each build is standalone and named after its game.</p>
+
+  <div class="grid">
+    <div class="card" id="card-fortnite">
+      <div class="tag">Windows x64</div>
+      <h3>Neo Flier — Fortnite</h3>
+      <div class="meta">external · EAC-safe</div>
+      <ul>
+        <li>Aimbot with smoothing + FOV</li>
+        <li>ESP, box, tracers</li>
+        <li>CosmeticUnlocker — every skin</li>
+        <li>Level spoofer</li>
+      </ul>
+      <button class="btn primary" onclick="download('fortnite')">Download .exe</button>
+    </div>
+
+    <div class="card" id="card-cod">
+      <div class="tag">Windows x64</div>
+      <h3>Neo Flier — Call of Duty</h3>
+      <div class="meta">external · Ricochet-aware</div>
+      <ul>
+        <li>Aimbot with prediction</li>
+        <li>ESP, skeleton, radar</li>
+        <li>Encrypted pointer handling</li>
+        <li>Handle hijack</li>
+      </ul>
+      <button class="btn primary" onclick="download('cod')">Download .exe</button>
+    </div>
+
+    <div class="card" id="card-minecraft">
+      <div class="tag">Fabric 1.21</div>
+      <h3>Neo Flier — Minecraft</h3>
+      <div class="meta">mod + bridge · server-invisible</div>
+      <ul>
+        <li>KillAura with GCD-legit aim</li>
+        <li>Fly, Speed, NoFall</li>
+        <li>Packet-safe against Grim</li>
+        <li>185-module GUI</li>
+      </ul>
+      <button class="btn primary" onclick="download('minecraft')">Download .jar</button>
+    </div>
+  </div>
+</section>
+
+<section id="install" class="wrap">
+  <h2>How to install</h2>
+  <p class="sub">Pick the client you downloaded. One line installs it.</p>
+
+  <div class="steps">
+    <h3 style="font-family:var(--mono);font-size:15px;margin-top:0">One-line install (PowerShell)</h3>
+    <pre><span class="copy" onclick="copyPre(this)">copy</span><code id="oneline">irm https://poggyneo.github.io/neoflierscripts/install.ps1 | iex</code></pre>
+
+    <h3 style="font-family:var(--mono);font-size:15px">Manual install</h3>
+    <ol>
+      <li>Download the <code>.exe</code> for your game above.</li>
+      <li>Put <code>skins.json</code> in <code>%APPDATA%\NeoFlier\</code> (the installer does this for you).</li>
+      <li>Run the client. Launch your game in <strong>borderless windowed</strong>.</li>
+      <li>Press <code>INSERT</code> to open the menu. It auto-attaches to the open game.</li>
+    </ol>
+
+    <h3 style="font-family:var(--mono);font-size:15px">Minecraft only</h3>
+    <ol>
+      <li>Install Fabric Loader for 1.21.</li>
+      <li>Drop <code>neo-flier-bridge.jar</code> into <code>.minecraft\mods\</code>.</li>
+      <li>Run <strong>Neo Flier — Minecraft</strong>; it connects on launch.</li>
+    </ol>
+  </div>
+</section>
+
+<section id="req" class="wrap">
+  <h2>Requirements</h2>
+  <div class="req">
+    <div><strong>OS</strong>Windows 10 or 11, 64-bit</div>
+    <div><strong>Game mode</strong>Borderless windowed (not exclusive fullscreen)</div>
+    <div><strong>Build tools</strong>Only if compiling: CMake, Visual Studio 2022</div>
+    <div><strong>Anti-cheat</strong>External + user-mode. Keep offsets current each patch.</div>
+  </div>
+</section>
+
+<section id="faq" class="wrap">
+  <h2>FAQ</h2>
+  <details><summary>Will I get banned?</summary>
+    <p>External, user-mode, handle-hijacked is the safest class against EAC and Ricochet. Minecraft mods are invisible to servers entirely.</p></details>
+  <details><summary>Does the skin changer change my real V-Bucks?</summary>
+    <p>No — V-Bucks are server-side. The CosmeticUnlocker lets you <em>use</em> any skin, backbling, pickaxe, glider or emote regardless of ownership.</p></details>
+  <details><summary>Why did features stop working after a patch?</summary>
+    <p>Fortnite and CoD offsets shift every patch. Re-dump them and rebuild; the site's client shows a banner when your offsets are stale.</p></details>
+  <details><summary>Do I need a kernel driver?</summary>
+    <p>No. Neo Flier is fully user-mode, which is exactly why it slips past driver scanners.</p></details>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="logo">neo<b>flier</b>scripts</div>
+    <div>Clients for Fortnite, Call of Duty and Minecraft.</div>
+    <div class="warn">Not affiliated with Epic Games, Activision or Mojang.</div>
+  </div>
+</footer>
+
+<script>
+const CONFIG = {
+  owner: "poggyneo",
+  repo:  "neoflierscripts",
+  version: "1.0.0",
+  files: {
+    fortnite:  "NeoFlier-Fortnite.exe",
+    cod:       "NeoFlier-COD.exe",
+    minecraft: "neo-flier-bridge-1.0.0.jar"
+  }
+};
+const RELEASE = `https://github.com/${CONFIG.owner}/${CONFIG.repo}/releases/download/v${CONFIG.version}`;
+
+function download(game){
+  const file = CONFIG.files[game];
+  if(!file){ alert("No file configured for " + game); return; }
+  window.location.href = `${RELEASE}/${file}`;
+}
+function scrollToClients(){
+  document.getElementById("clients").scrollIntoView({behavior:"smooth"});
+}
+function copyPre(btn){
+  const text = btn.parentElement.querySelector("code").innerText;
+  navigator.clipboard.writeText(text).then(()=>{
+    btn.innerText = "copied"; setTimeout(()=>btn.innerText="copy",1200);
+  });
+}
+document.querySelectorAll(".card").forEach(c=>{
+  c.addEventListener("mouseenter",()=>c.classList.add("active"));
+  c.addEventListener("mouseleave",()=>c.classList.remove("active"));
+});
+</script>
+</body>
+</html>
+
+# neoflierscripts — one-line installer
+$ErrorActionPreference = "Stop"
+$Owner = "poggyneo"; $Repo = "neoflierscripts"; $Version = "1.0.0"
+$Base  = "https://github.com/$Owner/$Repo/releases/download/v$Version"
+
+Write-Host ""
+Write-Host "  neoflierscripts" -ForegroundColor Cyan
+Write-Host "  ------------------------------------"
+Write-Host "  1) Fortnite"
+Write-Host "  2) Call of Duty"
+Write-Host "  3) Minecraft (Fabric mod)"
+$choice = Read-Host "  Pick your game [1-3]"
+
+$dest = Join-Path $env:USERPROFILE "NeoFlier"
+New-Item -ItemType Directory -Force $dest | Out-Null
+
+switch ($choice) {
+  "1" { $file = "NeoFlier-Fortnite.exe";  $exe = "NeoFlier-Fortnite.exe" }
+  "2" { $file = "NeoFlier-COD.exe";       $exe = "NeoFlier-COD.exe" }
+  "3" { $file = "neo-flier-bridge-1.0.0.jar"; $exe = $null }
+  default { Write-Host "Bad choice"; exit 1 }
+}
+
+$target = Join-Path $dest $file
+Write-Host "  Downloading $file ..." -ForegroundColor Yellow
+Invoke-WebRequest "$Base/$file" -OutFile $target
+
+try {
+  $appdata = Join-Path $env:APPDATA "NeoFlier"
+  New-Item -ItemType Directory -Force $appdata | Out-Null
+  Invoke-WebRequest "$Base/skins.json" -OutFile (Join-Path $appdata "skins.json")
+} catch { }
+
+if ($choice -eq "3") {
+  $mods = Join-Path $env:APPDATA ".minecraft\mods"
+  New-Item -ItemType Directory -Force $mods | Out-Null
+  Copy-Item $target $mods -Force
+  Write-Host "  Mod installed to .minecraft\mods" -ForegroundColor Green
+  Write-Host "  Run NeoFlier-Minecraft.exe after launching the game."
+} else {
+  Write-Host "  Installed to $target" -ForegroundColor Green
+  Start-Process $target
+}
+
+Write-Host ""
+Write-Host "  Launch your game in BORDERLESS WINDOWED, then press INSERT." -ForegroundColor Cyan
+
+# neoflierscripts
+
+Landing page + installer for the Neo Flier clients (Fortnite, Call of Duty, Minecraft).
+
+Owner: poggyneo
+
+## Publish the site (GitHub Pages)
+1. Settings -> Pages -> Source: `main` / root
+2. Live at https://poggyneo.github.io/neoflierscripts
+
+## Publish the downloads
+1. Let the `build` workflow finish under Actions.
+2. Create a Release tagged `v1.0.0`.
+3. Attach: NeoFlier-Fortnite.exe, NeoFlier-COD.exe,
+   neo-flier-bridge-1.0.0.jar, skins.json
+4. The website buttons now resolve to the release assets.
+
+## Build locally (optional)
+    build.bat
+
+## Files
+- index.html    landing page
+- install.ps1   one-line installer
+- src/          C++ client (three builds)
+- minecraft-mod Fabric bridge mod
+
+name: build
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fetch cosmetics
+        run: python tools/fetch_skins.py
+
+      - name: Configure
+        run: cmake -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Collect output
+        shell: cmd
+        run: |
+          mkdir out
+          copy build\Release\*.exe out\
+          copy assets\skins.json out\
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NeoFlier-windows
+          path: out/
+
+  minecraft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v3
+
+      - name: Build mod
+        working-directory: minecraft-mod
+        run: gradle build --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NeoFlier-minecraft-mod
+          path: minecraft-mod/build/libs/*.jar
+import json, urllib.request, os
+
+TYPES = {
+    "outfit":   ("character", "Characters"),
+    "backpack": ("backpack",  "Backpacks"),
+    "pickaxe":  ("pickaxe",   "Pickaxes"),
+    "glider":   ("glider",    "Gliders"),
+    "contrail": ("contrail",  "Contrails"),
+    "music":    ("music",     "MusicPacks"),
+}
+
+req = urllib.request.Request("https://fortnite-api.com/v2/cosmetics/br",
+                             headers={"User-Agent": "NeoFlier"})
+data = json.load(urllib.request.urlopen(req))["data"]
+
+out = {v[0]: [] for v in TYPES.values()}
+for c in data:
+    t = c["type"]["value"]
+    if t not in TYPES:
+        continue
+    key, folder = TYPES[t]
+    cid = c["id"]
+    out[key].append({
+        "name": c["name"],
+        "cid": f"/Game/Athena/Items/Cosmetics/{folder}/{cid}.{cid}",
+    })
+
+os.makedirs("assets", exist_ok=True)
+json.dump(out, open("assets/skins.json", "w"), indent=1)
+print(sum(len(v) for v in out.values()), "items across", len(out), "slots")
+
+
+    cmake_minimum_required(VERSION 3.20)
+project(NeoFlier LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
+include(FetchContent)
+FetchContent_Declare(imgui
+  GIT_REPOSITORY https://github.com/ocornut/imgui.git GIT_TAG docking)
+FetchContent_GetProperties(imgui)
+if(NOT imgui_POPULATED)
+  FetchContent_Populate(imgui)
+endif()
+
+set(CORE
+  src/overlay/overlay.cpp
+  src/core/game_manager.cpp
+  src/ui/menu.cpp
+  src/util/memory.cpp
+  src/util/stealth.cpp
+  src/util/log.cpp
+  ${imgui_SOURCE_DIR}/imgui.cpp
+  ${imgui_SOURCE_DIR}/imgui_draw.cpp
+  ${imgui_SOURCE_DIR}/imgui_tables.cpp
+  ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp)
+
+function(add_neoflier name title define)
+  add_executable(${name} WIN32 src/main.cpp ${CORE} ${ARGN})
+  target_compile_definitions(${name} PRIVATE ${define} NF_TITLE="${title}")
+  target_include_directories(${name} PRIVATE src
+    ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+  target_link_libraries(${name} PRIVATE d3d11 dxgi ws2_32)
+endfunction()
+
+add_neoflier("NeoFlier-Fortnite"  "Neo Flier - Fortnite"     NF_FORTNITE  src/games/fortnite.cpp)
+add_neoflier("NeoFlier-COD"       "Neo Flier - Call of Duty" NF_COD       src/games/cod.cpp)
+add_neoflier("NeoFlier-Minecraft" "Neo Flier - Minecraft"    NF_MINECRAFT src/games/minecraft_bridge.cpp)      
